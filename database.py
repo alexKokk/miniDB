@@ -15,7 +15,6 @@ class Database:
     def __init__(self, name, load=True):
         self.tables = {}
         self._name = name
-
         self.savedir = f'dbdata/{name}_db'
 
         if load:
@@ -38,7 +37,7 @@ class Database:
 
         # create all the meta tables
         self.create_table('meta_length',  ['table_name', 'no_of_rows'], [str, int])
-        self.create_table('meta_locks',  ['table_name', 'locked'], [str, bool])
+        self.create_table('meta_locks',  ['table_name', 'locked', 'lockedS'], [str, bool, bool]) 
         self.create_table('meta_insert_stack',  ['table_name', 'indexes'], [str, list])
         self.create_table('meta_indexes',  ['table_name', 'index_name'], [str, str])
         self.save()
@@ -309,9 +308,9 @@ class Database:
 
         '''
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_lockedX(table_name):  # exlusive locked check
             return
-        self.lockX_table(table_name)
+        self.lockS_table(table_name)    # Share mode locking
         if condition is not None:
             condition_column = split_condition(condition)[0]
         if self._has_index(table_name) and condition_column==self.tables[table_name].column_names[self.tables[table_name].pk_idx]:
@@ -320,7 +319,7 @@ class Database:
             table = self.tables[table_name]._select_where_with_btree(columns, bt, condition, order_by, asc, top_k)
         else:
             table = self.tables[table_name]._select_where(columns, condition, order_by, asc, top_k)
-        self.unlock_table(table_name)
+        self.unlockS_table(table_name)
         if save_as is not None:
             table._name = save_as
             self.table_from_object(table)
@@ -398,6 +397,21 @@ class Database:
 
         self.tables['meta_locks']._update_row(True, 'locked', f'table_name=={table_name}')
         self._save_locks()
+        self.meta_locks.show()
+        # print(f'Locking table "{table_name}"')
+
+    def lockS_table(self, table_name):
+        '''
+        Locks the specified table using the Share lock (S)
+
+        table_name -> table's name (needs to exist in database)
+        '''
+        if table_name[:4]=='meta':
+            return
+
+        self.tables['meta_locks']._update_row(True, 'lockedS', f'table_name=={table_name}')
+        self._save_locks()
+        self.meta_locks.show()
         # print(f'Locking table "{table_name}"')
 
     def unlock_table(self, table_name):
@@ -409,6 +423,15 @@ class Database:
         self.tables['meta_locks']._update_row(False, 'locked', f'table_name=={table_name}')
         self._save_locks()
         # print(f'Unlocking table "{table_name}"')
+    def unlockS_table(self, table_name):
+        '''
+        Unlocks the specified table that is exclusivelly locked (X)
+
+        table_name -> table's name (needs to exist in database)
+        '''
+        self.tables['meta_locks']._update_row(False, 'lockedS', f'table_name=={table_name}')
+        self._save_locks()
+        # print(f'Unlocking table "{table_name}"')
 
     def is_locked(self, table_name):
         '''
@@ -418,7 +441,6 @@ class Database:
         '''
         if table_name[:4]=='meta':  # meta tables will never be locked (they are internal)
             return False
-
         with open(f'{self.savedir}/meta_locks.pkl', 'rb') as f:
             self.tables.update({'meta_locks': pickle.load(f)})
             self.meta_locks = self.tables['meta_locks']
@@ -428,10 +450,35 @@ class Database:
             if res:
                 print(f'Table "{table_name}" is currently locked.')
             return res
-
         except IndexError:
             return
+        try:
+            res = self.select('meta_locks', ['lockedS'], f'table_name=={table_name}', return_object=True).lockedS[0]
+            if res:
+                print(f'Table "{table_name}" is currently available only for reading.')
+            return res
+        except IndexError:
+            return
+    def is_lockedX(self, table_name):
+        '''
+        Check whether the specified table is Share locked (S)
 
+        table_name -> table's name (needs to exist in database)
+        '''
+        if table_name[:4]=='meta':  # meta tables will never be locked (they are internal)
+            return False
+        with open(f'{self.savedir}/meta_locks.pkl', 'rb') as f:
+            self.tables.update({'meta_locks': pickle.load(f)})
+            self.meta_locks = self.tables['meta_locks']
+        try:
+            res = self.select('meta_locks', ['locked'], f'table_name=={table_name}', return_object=True).locked[0]
+            if res:
+                print(f'Table "{table_name}" is currently locked.')    
+            else:
+                print(f'Table "{table_name}" is currently available for reading.')
+        except IndexError:
+            return
+        return res
     #### META ####
 
     # The following functions are used to update, alter, load and save the meta tables.
@@ -463,7 +510,7 @@ class Database:
                 continue
             if table._name not in self.meta_locks.table_name:
 
-                self.tables['meta_locks']._insert([table._name, False])
+                self.tables['meta_locks']._insert([table._name, False, False])
                 # self.insert('meta_locks', [table._name, False])
 
     def _update_meta_insert_stack(self):
